@@ -1,0 +1,17 @@
+# rustfmt 专属配置。
+# 缩进、行尾、编码、末尾换行、最大行宽等风格值以 .editorconfig 为唯一声明源；
+# 本文件只放 .editorconfig 表达不了、或 rustfmt 必须自己知道的项。
+# 两者一致性由 scripts/check.sh 的守卫自动校验。
+
+# Rust 语言版本（.editorconfig 没有对应概念）
+edition = "2024"
+
+# rustfmt 不读 .editorconfig，而它的默认值 Auto 会原样保留 CRLF；
+# 写死 Unix 才能让 cargo fmt 把 .rs 的行尾自动改成 LF（对应 .editorconfig 的 end_of_line = lf）
+newline_style = "Unix"
+
+# 以下为 Rust 语义类排版规则，.editorconfig 无法表达
+reorder_imports = true
+reorder_modules = true
+merge_derives = true
+use_field_init_shorthand = true

@@ -1,0 +1,19 @@
+[package]
+name = "agent-rs"
+version = "0.1.0"
+edition = "2024"
+# cargo 可见的 Rust 下限，必须与 rust-toolchain.toml 的 channel 同 major.minor
+rust-version = "1.98"
+
+[dependencies]
+tokio = {
+    version = "1",
+    features = ["full"]
+}
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"

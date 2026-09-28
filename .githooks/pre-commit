@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 提交前校验：每次提交都跑一遍全量检查（守卫 + 格式 + clippy + 测试），只检查不修改。
+# 本地过不去的东西 CI 同样过不去，所以没有绕过路径：修好再提交。
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! ./scripts/check.sh; then
+    printf '\n[提交已中止] 校验未通过。\n' >&2
+    printf '[修复] 先运行 ./scripts/format.sh 自动修复格式与 lint，其余失败项按上面报错处理，修好后重新提交。\n' >&2
+    exit 1
+fi

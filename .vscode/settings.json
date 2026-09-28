@@ -1,0 +1,9 @@
+{
+  // 只放 .editorconfig 管不了的设置：缩进、行尾、编码等一律由 .editorconfig 决定
+  "editor.formatOnSave": true,
+  "[rust]": {
+    "editor.defaultFormatter": "rust-lang.rust-analyzer"
+  },
+  "rust-analyzer.check.command": "clippy",
+  "rust-analyzer.cargo.allTargets": true
+}

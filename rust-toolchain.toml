@@ -1,0 +1,6 @@
+# 工具链唯一来源。升级时改这里的 channel，并同步 Cargo.toml 的 rust-version
+# （两者由 scripts/check.sh 的守卫校验，必须同 major.minor）。
+# 首次安装或升级本工具链后，需重启编辑器的 rust-analyzer 会话：它可能仍按旧工具链加载 proc-macro 而报 ABI 不匹配。
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,5 @@
+# 项目级 Codex 配置（仅在受信任的项目中生效）。
+# rust-analyzer-lsp 只在启用它的项目里生效；用户层默认关闭，其他项目需要时照抄本文件即可。
+
+[plugins."rust-analyzer-lsp@claude-plugins-official"]
+enabled = true

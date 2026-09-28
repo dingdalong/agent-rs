@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: 全量检查（守卫 + 格式 + lint + 测试）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 工具链版本与组件来自 rust-toolchain.toml（唯一来源）
+      - name: 安装工具链
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - name: 缓存依赖与构建产物
+        uses: Swatinem/rust-cache@v2
+
+      - name: 全量校验
+        run: ./scripts/check.sh
+
+  build:
+    name: 发布构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 工具链版本来自 rust-toolchain.toml（唯一来源）
+      - name: 安装工具链
+        run: rustup show
+
+      - name: 缓存依赖与构建产物
+        uses: Swatinem/rust-cache@v2
+
+      - name: 发布构建
+        run: ./scripts/build.sh

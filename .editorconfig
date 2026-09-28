@@ -1,0 +1,24 @@
+# EditorConfig is awesome: https://EditorConfig.org
+
+# top-most EditorConfig file
+root = true
+
+# 本文件是全仓库（含 .rs）风格值的唯一声明源，自己也遵守同一套规则。
+# .rs 的最终排版由 cargo fmt 执行（rustfmt 专属项见 rustfmt.toml），此处是它要遵循的声明；
+# 两者一致性由 scripts/check.sh 的守卫自动校验。
+[*]
+indent_style = space
+indent_size = 4
+end_of_line = lf
+charset = utf-8
+trim_trailing_whitespace = true
+insert_final_newline = true
+max_line_length = 100
+
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+[makefile|Makefile]
+indent_style = tab
+indent_size = 4
