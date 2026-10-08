@@ -1,0 +1,4 @@
+# 复制为 auth.toml 并填入真实凭据；auth.toml 已在 .gitignore 中，不会提交。
+
+[llm.providers.deepseek]
+api_key = ""

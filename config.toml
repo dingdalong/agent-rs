@@ -1,0 +1,8 @@
+# 非敏感配置，随仓库提交。敏感凭据放 auth.toml（不提交）。
+
+[llm]
+# 默认模型规则：provider/model
+default_model = "deepseek/deepseek-flash"
+
+[llm.providers.deepseek]
+url = "https://api.deepseek.com"

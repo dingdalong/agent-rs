@@ -4,6 +4,10 @@
   "[rust]": {
     "editor.defaultFormatter": "rust-lang.rust-analyzer"
   },
+  // 保存时不跑 cargo 检查：避免与 ./scripts/check.sh、agent 侧 rust-analyzer 争抢 target/ 锁。
+  // 需要类型级诊断时，用命令面板的 rust-analyzer: Run flycheck 按需运行。
+  "rust-analyzer.checkOnSave": false,
+  // 以下两项只对手动触发的检查生效。
   "rust-analyzer.check.command": "clippy",
   "rust-analyzer.cargo.allTargets": true
 }
