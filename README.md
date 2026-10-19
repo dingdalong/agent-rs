@@ -10,12 +10,26 @@
 
 ## 运行配置
 
-程序只读取当前工作目录下的 `config.toml` 与 `auth.toml`，请在仓库根目录运行。
+程序只读取启动目录下的 `config.toml` 与 `auth.toml`，请在仓库根目录运行。
 
 - `config.toml`：提交入库。`[llm]` 分节的 `default_model` 指定默认模型规则，规则形如 `provider/model`；`[llm.providers.<名字>]` 分节声明各 provider 的 `url`。
 - `auth.toml`：本地凭据，已被 `.gitignore` 忽略。可按 `auth.toml.example` 复制创建，用同样的 `[llm.providers.<名字>]` 分节填 `api_key`。
 
 启动时会检查两个配置文件是否存在且能解析，缺失或格式错误会直接提示并退出。LLM 内容只做解析，不做校验：模型规则不合法、provider 未声明、url 或 api_key 缺失都会在对话时提示，本轮结束但会话继续。可以配置多个 provider，同一个会话里的不同 Agent 按各自模型规则使用不同 provider。运行 `cargo run` 进入对话，输入 `exit`、`quit`、`/exit` 或 Ctrl-D 结束；运行期失败只提示，不会结束进程。
+
+工具与沙盒默认使用启动目录。运行 `cargo run -- --workspace <目录>` 可以把工具与沙盒的工作区换成另一个真实目录，配置仍从启动目录读取；未指定时保持原有行为。工作区必须存在，相对路径以启动目录为基准解析。
+
+## Agent 端到端验证
+
+Codex 等开发 Agent 修改功能后，可以使用真实模型和实际需求跑端到端验证，不需要另写固定测试场景：
+
+1. 从仓库根启动，确保读取当前配置与凭据。
+2. 新建一个临时目录作为工作区，按本次任务准备所需文件和初始状态；不要把 `auth.toml` 复制进去。
+3. 使用 `RUST_LOG=agent_rs=info cargo run -- --workspace <临时工作区>` 启动交互式会话。
+4. 逐轮输入正常、异常和边界需求，观察输出与日志，并检查临时工作区里的文件和其他产物。
+5. 需要验证重启时，结束进程后对同一个临时工作区重新启动。文件状态保留，对话历史不会恢复。
+
+终端里的思考、回答、工具调用与结果仍按原有格式输出；启动环境、模块初始化和错误日志写入 stderr。默认只显示警告与错误，`RUST_LOG=agent_rs=info` 查看启动与异常，`RUST_LOG=agent_rs=debug` 额外查看每次模型请求和工具调用。
 
 ## 工具与沙盒
 
@@ -42,4 +56,7 @@
 
 ## 日志
 
-默认只输出警告与错误，可用 `RUST_LOG` 覆盖，例如 `RUST_LOG=info cargo run`。
+默认只输出警告与错误，可用 `RUST_LOG` 覆盖：
+
+- `RUST_LOG=agent_rs=info`：启动环境、模块初始化与异常。
+- `RUST_LOG=agent_rs=debug`：在上述内容之外，每次模型请求和工具调用各记录一条步骤日志。

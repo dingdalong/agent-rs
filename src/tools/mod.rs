@@ -114,6 +114,7 @@ impl ToolExecutor {
                 name: call.name.clone(),
                 summary: self.call_summary(call),
             });
+            tracing::debug!(tool = %call.name, "执行工具调用");
             let text = self.execute(&call.name, &call.arguments).await;
             ui.render(UiEvent::ToolResult(text.clone()));
             results.push(function_call_output(&call.call_id, text));

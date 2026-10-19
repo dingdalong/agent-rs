@@ -103,8 +103,8 @@ impl Agent {
             let request = self.request_items(pending_input.as_ref());
             let tools = self.tools.definitions();
             let llm = self.llm.as_ref().expect("LLM 已在上面构建成功");
-            let step = match llm.chat(request, tools, ui).await {
-                Ok(step) => step,
+            let outcome = match llm.chat(request, tools, ui).await {
+                Ok(outcome) => outcome,
                 // 原始错误已在供应商实现内记录；已提交的步骤保留，本轮就此结束。
                 Err(message) => {
                     ui.render(UiEvent::Error(message));
@@ -113,14 +113,13 @@ impl Agent {
             };
 
             // 工具结果与调用同一步提交，保证历史里不会出现没有结果的函数调用。
-            let mut committed = step.output_items;
+            let mut committed = outcome.output_items;
             let tool_outputs = self.tools.execute_calls(&committed, ui).await;
             let needs_follow_up = !tool_outputs.is_empty();
             committed.extend(tool_outputs);
             self.commit_step(pending_input.take(), committed);
 
             if !needs_follow_up {
-                tracing::info!(items = self.history.len(), "本轮对话完成");
                 ui.render(UiEvent::TurnFinished);
                 return;
             }

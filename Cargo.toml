@@ -7,6 +7,7 @@ rust-version = "1.98"
 
 [dependencies]
 async-openai = { version = "0.41.3", features = ["responses"] }
+clap = { version = "4", features = ["derive"] }
 futures-util = "0.3.34"
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal"] }
 serde = { version = "1.0.229", features = ["derive"] }

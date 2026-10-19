@@ -175,6 +175,9 @@ impl Bash {
             };
         let stdout = collect_output(stdout_task).await;
         let stderr = collect_output(stderr_task).await;
+        if status.is_none() {
+            tracing::warn!(timeout_ms, "bash 命令超时，已强制终止");
+        }
 
         let parts = ResultParts {
             timed_out: status.is_none(),

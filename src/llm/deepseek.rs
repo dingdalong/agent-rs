@@ -33,7 +33,6 @@ impl DeepSeekClient {
     /// 用 provider 的连接信息、凭据与模型名构造客户端。
     pub(crate) fn new(url: &str, api_key: &str, model: &str) -> Self {
         let openai_config = OpenAIConfig::new().with_api_base(url).with_api_key(api_key);
-        tracing::info!(url, model, "初始化 DeepSeek 客户端");
         Self {
             client: Client::with_config(openai_config),
             model: model.to_string(),
@@ -67,6 +66,7 @@ async fn respond(
     input: Vec<InputItem>,
     tools: Vec<LlmTool>,
 ) -> Result<EventStream, OpenAIError> {
+    tracing::debug!(model = %client.model, "发送模型请求");
     let mut builder = CreateResponseArgs::default();
     fill_request(&mut builder, &client.model, input, tools);
     let request = builder.build()?;

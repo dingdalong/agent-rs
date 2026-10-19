@@ -66,6 +66,7 @@ pub fn build(config: &Config, model: &str) -> Result<Box<dyn LLM>, String> {
             tracing::info!(
                 provider = provider_name,
                 model = model_name,
+                url,
                 "构建 LLM 实现"
             );
             Ok(Box::new(client))
