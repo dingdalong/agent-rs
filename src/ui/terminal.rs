@@ -16,6 +16,10 @@ const EXIT_COMMANDS: [&str; 3] = ["exit", "quit", "/exit"];
 const REASONING_PREFIX: &str = "[思考] ";
 /// 正文块首前缀，与思考过程区分。
 const ANSWER_PREFIX: &str = "[助手] ";
+/// 工具调用行前缀。
+const TOOL_CALL_PREFIX: &str = "[工具] ";
+/// 工具结果块前缀。
+const TOOL_RESULT_PREFIX: &str = "[工具结果] ";
 
 /// 终端 UI：正文、思考与提示符写 stdout，错误与会话结束写 stderr。
 pub struct TerminalUi {
@@ -119,6 +123,10 @@ enum OutputBlock {
     Reasoning,
     /// 正文块，块首写 `[助手] `。
     Answer,
+    /// 单行工具调用块，块首写 `[工具] `。
+    ToolCall,
+    /// 工具结果块，块首写 `[工具结果] `。
+    ToolResult,
 }
 
 /// 流式输出格式化器：把语义事件整理成带前缀与换行的输出片段。
@@ -151,6 +159,25 @@ impl OutputFormatter {
                 }
                 self.start_block(OutputBlock::Reasoning, REASONING_PREFIX, &mut chunks);
                 self.write_text(text, &mut chunks);
+            }
+            UiEvent::ToolCall { name, summary } => {
+                let line = if summary.is_empty() {
+                    format!("{name}\n")
+                } else {
+                    format!("{name}：{summary}\n")
+                };
+                self.start_block(OutputBlock::ToolCall, TOOL_CALL_PREFIX, &mut chunks);
+                self.write_text(&line, &mut chunks);
+                // 每次调用独占一行，下一次调用/结果重新写前缀。
+                self.block = None;
+            }
+            UiEvent::ToolResult(text) => {
+                if text.is_empty() {
+                    return chunks;
+                }
+                self.start_block(OutputBlock::ToolResult, TOOL_RESULT_PREFIX, &mut chunks);
+                self.write_text(text, &mut chunks);
+                self.block = None;
             }
             UiEvent::TurnFinished => {
                 self.close_line(&mut chunks);

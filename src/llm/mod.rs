@@ -10,7 +10,7 @@ mod deepseek;
 
 use std::{future::Future, pin::Pin};
 
-use async_openai::types::responses::InputItem;
+use async_openai::types::responses::{InputItem, Tool as LlmTool};
 
 use crate::{config::Config, ui::Ui};
 
@@ -29,12 +29,14 @@ pub struct StepOutcome {
 pub trait LLM: Send + Sync {
     /// 发起一次模型请求（一个步骤）：`input` 是本步要发送的完整 items。
     ///
-    /// 实现方负责把 items 转换成自家请求格式、发起请求、把流式增量渲染到 `ui`，
-    /// 并返回 `OpenAI` 格式的本步输出 item；失败时返回面向用户的说明，
-    /// 原始错误由实现记录日志。实现不保存任何对话状态。
+    /// `tools` 是模型可以调用的工具定义（`OpenAI` 格式）；实现方负责把 items 与
+    /// tools 转换成自家请求格式、发起请求、把流式增量渲染到 `ui`，并返回 `OpenAI`
+    /// 格式的本步输出 item；失败时返回面向用户的说明，原始错误由实现记录日志。
+    /// 实现不保存任何对话状态。
     fn chat<'a>(
         &'a self,
         input: Vec<InputItem>,
+        tools: Vec<LlmTool>,
         ui: &'a mut (dyn Ui + Send),
     ) -> Pin<Box<dyn Future<Output = Result<StepOutcome, String>> + Send + 'a>>;
 }

@@ -9,6 +9,8 @@
 //!
 //! 运行期失败在本模块内消化：提示用户后结束本轮，已提交的步骤保留。
 
+use std::path::PathBuf;
+
 use async_openai::types::responses::{EasyInputMessage, InputItem};
 
 use crate::{
@@ -22,25 +24,31 @@ use crate::{
 pub struct Agent {
     /// 配置的 provider 表，切换模型时按需重建实现。
     config: Config,
+    /// 工作目录：命令的默认工作目录与沙盒根；`with_tools` 重新装配工具时使用。
+    workspace: PathBuf,
     /// 当前模型规则：创建时默认取配置的 `default_model`，可用 `with_model` 覆盖。
     model: Option<String>,
     /// 按当前模型规则惰性构建的实现。
     llm: Option<Box<dyn LLM>>,
-    /// 工具执行器：当前为空注册表，调用一律按「工具不存在」回写结果。
+    /// 工具执行器：按注册名选取好的内置工具，默认全部、可用 `with_tools` 收窄。
     tools: ToolExecutor,
     /// 对话历史（OpenAI 格式）；只在本模块内写入。
     history: Vec<InputItem>,
 }
 
 impl Agent {
-    /// 用配置创建 Agent，模型取 `default_model`。
-    pub fn new(config: Config) -> Self {
+    /// 用配置与工作目录创建 Agent：模型取 `default_model`，工具注册全部内置项。
+    ///
+    /// 工作目录既是命令的默认工作目录，也是沙盒默认可写的项目根。
+    pub fn new(config: Config, workspace: PathBuf) -> Self {
         let model = config.default_model.clone();
+        let tools = ToolExecutor::builtin(None, &config, &workspace);
         Self {
             config,
+            workspace,
             model,
             llm: None,
-            tools: ToolExecutor::new(),
+            tools,
             history: Vec::new(),
         }
     }
@@ -64,6 +72,16 @@ impl Agent {
         self.llm = None;
     }
 
+    /// 指定本 Agent 使用的工具（按注册名）；不调用时注册全部内置工具。
+    ///
+    /// 名称不存在或重复时记录日志并跳过，不影响会话继续；空名单表示不注册任何工具。
+    // 目前只有测试会用到，保留为多 Agent 场景的程序入口。
+    #[allow(dead_code)]
+    pub fn with_tools(mut self, names: &[&str]) -> Self {
+        self.tools = ToolExecutor::builtin(Some(names), &self.config, &self.workspace);
+        self
+    }
+
     /// 推进一轮对话：按步骤请求模型，成功一步提交一步，失败只提示并结束本轮。
     ///
     /// 阶段约定：只有完整步骤写入历史，中断的模型输出一律丢弃；用户输入随
@@ -83,8 +101,9 @@ impl Agent {
 
         loop {
             let request = self.request_items(pending_input.as_ref());
+            let tools = self.tools.definitions();
             let llm = self.llm.as_ref().expect("LLM 已在上面构建成功");
-            let step = match llm.chat(request, ui).await {
+            let step = match llm.chat(request, tools, ui).await {
                 Ok(step) => step,
                 // 原始错误已在供应商实现内记录；已提交的步骤保留，本轮就此结束。
                 Err(message) => {
@@ -95,7 +114,7 @@ impl Agent {
 
             // 工具结果与调用同一步提交，保证历史里不会出现没有结果的函数调用。
             let mut committed = step.output_items;
-            let tool_outputs = self.tools.execute_calls(&committed);
+            let tool_outputs = self.tools.execute_calls(&committed, ui).await;
             let needs_follow_up = !tool_outputs.is_empty();
             committed.extend(tool_outputs);
             self.commit_step(pending_input.take(), committed);

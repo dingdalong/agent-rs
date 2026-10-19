@@ -16,6 +16,7 @@ fn config_with(name: &str, url: Option<&str>, api_key: Option<&str>) -> Config {
     Config {
         default_model: None,
         providers,
+        ..Config::default()
     }
 }
 

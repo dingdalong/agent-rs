@@ -42,6 +42,68 @@ fn normal_input_is_not_exit() {
 }
 
 #[test]
+fn each_tool_call_starts_its_own_line() {
+    let chunks = format_all(&[
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: "ls".to_string(),
+        },
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: "pwd".to_string(),
+        },
+    ]);
+
+    assert_eq!(
+        chunks,
+        vec![
+            stdout("[工具] "),
+            stdout("bash：ls\n"),
+            stdout("[工具] "),
+            stdout("bash：pwd\n"),
+        ]
+    );
+}
+
+#[test]
+fn tool_result_and_following_answer_start_new_blocks() {
+    let chunks = format_all(&[
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: "ls".to_string(),
+        },
+        UiEvent::ToolResult("退出码：0\n".to_string()),
+        UiEvent::AnswerText("看完了".to_string()),
+    ]);
+
+    assert_eq!(
+        chunks,
+        vec![
+            stdout("[工具] "),
+            stdout("bash：ls\n"),
+            stdout("[工具结果] "),
+            stdout("退出码：0\n"),
+            stdout("[助手] "),
+            stdout("看完了"),
+        ]
+    );
+}
+
+#[test]
+fn empty_tool_events_do_not_write_anything() {
+    let chunks = format_all(&[
+        UiEvent::ToolResult(String::new()),
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: String::new(),
+        },
+    ]);
+
+    // 空结果不写；调用摘要为空时仍然写一行工具名。
+    assert_eq!(chunks, vec![stdout("[工具] "), stdout("bash\n")]);
+}
+
+#[test]
 fn reasoning_prefix_is_written_once_per_block() {
     let chunks = format_all(&[
         UiEvent::ReasoningText("先理解".to_string()),

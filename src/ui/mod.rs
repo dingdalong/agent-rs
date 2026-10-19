@@ -12,6 +12,10 @@ pub enum UiEvent {
     AnswerText(String),
     /// 思考过程增量。
     ReasoningText(String),
+    /// 模型发起一次工具调用；`summary` 是调用的一行摘要（如要执行的命令）。
+    ToolCall { name: String, summary: String },
+    /// 一次工具调用的结果文本。
+    ToolResult(String),
     /// 本轮成功输出结束，接收方据此收尾换行并复位格式状态。
     TurnFinished,
     /// 需要展示给用户的错误。

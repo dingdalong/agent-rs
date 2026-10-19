@@ -4,7 +4,8 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-use super::load;
+use super::{BashConfig, load};
+use crate::sandbox::SandboxMode;
 
 /// 每个用例独立的临时目录，避免相互干扰。
 fn temp_dir(name: &str) -> PathBuf {
@@ -187,4 +188,64 @@ fn load_reports_missing_config_file() {
     let error = load(&dir).expect_err("缺少 config.toml 应报错");
 
     assert!(error.contains("config.toml"), "{error}");
+}
+
+#[test]
+fn bash_tool_section_is_loaded() {
+    let dir = temp_dir("tools-bash");
+    write_config(
+        &dir,
+        r#"
+            [tools.bash]
+            sandbox_mode = "read-only"
+            network_access = true
+            timeout_ms = 5000
+            writable_roots = ["/opt/数据"]
+            "#,
+    );
+    write_auth(&dir, "");
+
+    let config = load(&dir).expect("配置应读取成功");
+
+    assert_eq!(config.bash.sandbox_mode, SandboxMode::ReadOnly);
+    assert!(config.bash.network_access);
+    assert_eq!(config.bash.timeout_ms, 5_000);
+    assert_eq!(config.bash.writable_roots, vec![PathBuf::from("/opt/数据")]);
+}
+
+#[test]
+fn bash_tool_defaults_are_conservative() {
+    let dir = temp_dir("tools-default");
+    write_config(&dir, "");
+    write_auth(&dir, "");
+
+    let config = load(&dir).expect("配置应读取成功");
+
+    assert_eq!(config.bash, BashConfig::default());
+    assert_eq!(config.bash.sandbox_mode, SandboxMode::WorkspaceWrite);
+    assert!(!config.bash.network_access, "默认必须禁网");
+    assert_eq!(config.bash.timeout_ms, 120_000);
+    assert!(config.bash.writable_roots.is_empty());
+}
+
+#[test]
+fn bash_tool_section_rejects_unknown_field() {
+    let dir = temp_dir("tools-unknown-field");
+    write_config(&dir, "[tools.bash]\nnetwrok_access = true\n");
+    write_auth(&dir, "");
+
+    let error = load(&dir).expect_err("字段名写错应报错");
+
+    assert!(error.contains("内容无效"), "{error}");
+}
+
+#[test]
+fn bash_tool_section_rejects_unknown_mode() {
+    let dir = temp_dir("tools-unknown-mode");
+    write_config(&dir, "[tools.bash]\nsandbox_mode = \"无限制\"\n");
+    write_auth(&dir, "");
+
+    let error = load(&dir).expect_err("未知沙盒模式应报错");
+
+    assert!(error.contains("内容无效"), "{error}");
 }

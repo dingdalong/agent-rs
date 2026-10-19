@@ -11,7 +11,7 @@ use async_openai::{
     Client,
     config::OpenAIConfig,
     error::OpenAIError,
-    types::responses::{CreateResponseArgs, InputItem, ResponseStreamEvent},
+    types::responses::{CreateResponseArgs, InputItem, ResponseStreamEvent, Tool as LlmTool},
 };
 use futures_util::{Stream, StreamExt};
 
@@ -45,10 +45,11 @@ impl LLM for DeepSeekClient {
     fn chat<'a>(
         &'a self,
         input: Vec<InputItem>,
+        tools: Vec<LlmTool>,
         ui: &'a mut (dyn Ui + Send),
     ) -> Pin<Box<dyn Future<Output = Result<StepOutcome, String>> + Send + 'a>> {
         Box::pin(async move {
-            let stream = match respond(self, input).await {
+            let stream = match respond(self, input, tools).await {
                 Ok(stream) => stream,
                 Err(error) => {
                     tracing::error!(%error, model = %self.model, "发起对话请求失败");
@@ -60,19 +61,33 @@ impl LLM for DeepSeekClient {
     }
 }
 
-/// 发起一次流式请求：items 由调用方组装，这里原样发送。
+/// 发起一次流式请求：items 与工具定义由调用方组装，这里原样发送。
 async fn respond(
     client: &DeepSeekClient,
     input: Vec<InputItem>,
+    tools: Vec<LlmTool>,
 ) -> Result<EventStream, OpenAIError> {
-    let request = CreateResponseArgs::default()
-        .model(client.model.clone())
-        .input(input)
-        .build()?;
+    let mut builder = CreateResponseArgs::default();
+    fill_request(&mut builder, &client.model, input, tools);
+    let request = builder.build()?;
     let stream = client.client.responses().create_stream(request).await?;
     Ok(Box::pin(stream.filter(|event| {
         futures_util::future::ready(skip_stream_error(event))
     })))
+}
+
+/// 把模型规则、历史 items 与工具定义填进请求构造器；单独抽出来便于测试断言下发内容。
+fn fill_request(
+    builder: &mut CreateResponseArgs,
+    model: &str,
+    input: Vec<InputItem>,
+    tools: Vec<LlmTool>,
+) {
+    builder.model(model.to_string()).input(input);
+    // 没有工具时不下发空数组，避免供应商对空列表的处理差异。
+    if !tools.is_empty() {
+        builder.tools(tools);
+    }
 }
 
 /// 消费一个模型步骤的流：推送语义事件，并在结束事件上返回结果。

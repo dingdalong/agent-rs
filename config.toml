@@ -6,3 +6,14 @@ default_model = "deepseek/deepseek-flash"
 
 [llm.providers.deepseek]
 url = "https://api.deepseek.com"
+
+# bash 工具：模型请求的命令都会在平台沙盒里执行。
+[tools.bash]
+# 沙盒模式：workspace-write（工作区与临时目录可写，默认）| read-only（全部只读）
+sandbox_mode = "workspace-write"
+# 是否允许命令访问网络：默认 false（禁网）
+network_access = false
+# 单条命令的默认超时（毫秒）
+timeout_ms = 120000
+# 工作区与临时目录之外追加的可写根，写绝对路径（默认空）
+writable_roots = []

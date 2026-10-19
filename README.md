@@ -17,6 +17,23 @@
 
 启动时会检查两个配置文件是否存在且能解析，缺失或格式错误会直接提示并退出。LLM 内容只做解析，不做校验：模型规则不合法、provider 未声明、url 或 api_key 缺失都会在对话时提示，本轮结束但会话继续。可以配置多个 provider，同一个会话里的不同 Agent 按各自模型规则使用不同 provider。运行 `cargo run` 进入对话，输入 `exit`、`quit`、`/exit` 或 Ctrl-D 结束；运行期失败只提示，不会结束进程。
 
+## 工具与沙盒
+
+模型可以调用 `bash` 工具执行命令，命令一律在平台沙盒里运行，不会无沙盒裸跑。
+
+- 边界：整机可读；可写范围只有工作区（启动目录）、系统临时目录与配置里追加的可写根；网络默认关闭。
+- 实现：macOS 用系统 Seatbelt（固定 `/usr/bin/sandbox-exec`）；Linux 用 bubblewrap，需要先安装（`sudo apt install bubblewrap` 或 `sudo dnf install bubblewrap`）并允许非特权用户命名空间。
+- 沙盒不可用时命令直接失败，并把原因作为工具结果回给模型；不会退回无沙盒执行。
+- 命令在独立会话里执行（不接触你的终端），标准输入接 `/dev/null`，超时后整个进程组会被强制终止。
+- 终端会把每次调用展示成 `[工具] bash：<命令>`，结果展示成 `[工具结果] …`，方便审计模型做了什么。
+
+`[tools.bash]` 分节的配置项：
+
+- `sandbox_mode`：`workspace-write`（默认，工作区与临时目录可写）或 `read-only`（全部只读）。
+- `network_access`：默认 `false`（禁网）。改成 `true` 后命令可以访问网络，例如安装依赖。
+- `timeout_ms`：单条命令的默认超时毫秒数，默认 120000，取值范围 1000-600000；模型也能按调用覆盖。
+- `writable_roots`：工作区与临时目录之外追加的可写根，写绝对路径（不展开 `~`），例如 `["/Users/you/.cargo"]`。需要 `cargo` 下载依赖时通常要同时打开 `network_access` 并追加 `~/.cargo` 的绝对路径。
+
 ## 输出约定
 
 - 正文、思考与输入提示写 stdout，错误提示、会话结束与日志写 stderr。

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use async_openai::types::responses::{InputItem, OutputItem};
+use async_openai::types::responses::{InputItem, OutputItem, Tool as LlmTool};
 use serde_json::json;
 
 use super::Agent;
@@ -52,6 +52,7 @@ struct StubLlm {
 #[derive(Default)]
 struct StubState {
     requests: Mutex<Vec<Vec<InputItem>>>,
+    tools: Mutex<Vec<Vec<LlmTool>>>,
 }
 
 impl StubState {
@@ -60,6 +61,16 @@ impl StubState {
         self.requests
             .lock()
             .expect("请求记录锁未被污染")
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// 最近一次请求下发给模型的工具定义。
+    fn last_tools(&self) -> Vec<LlmTool> {
+        self.tools
+            .lock()
+            .expect("工具记录锁未被污染")
             .last()
             .cloned()
             .unwrap_or_default()
@@ -83,6 +94,7 @@ impl LLM for StubLlm {
     fn chat(
         &self,
         input: Vec<InputItem>,
+        tools: Vec<LlmTool>,
         _ui: &mut (dyn Ui + Send),
     ) -> Pin<Box<dyn Future<Output = Result<StepOutcome, String>> + Send + '_>> {
         self.state
@@ -90,6 +102,11 @@ impl LLM for StubLlm {
             .lock()
             .expect("请求记录锁未被污染")
             .push(input);
+        self.state
+            .tools
+            .lock()
+            .expect("工具记录锁未被污染")
+            .push(tools);
         let reply = self
             .replies
             .lock()
@@ -179,6 +196,20 @@ fn user_text(item: &InputItem) -> Option<String> {
     value.get("content")?.as_str().map(str::to_string)
 }
 
+/// 从事件序列里取出工具调用摘要与结果文本，忽略其它事件。
+fn tool_events(events: &[UiEvent]) -> (Vec<(String, String)>, Vec<String>) {
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for event in events {
+        match event {
+            UiEvent::ToolCall { name, summary } => calls.push((name.clone(), summary.clone())),
+            UiEvent::ToolResult(text) => results.push(text.clone()),
+            _ => {}
+        }
+    }
+    (calls, results)
+}
+
 /// 注入替身的 Agent，不发起真实请求。
 fn agent_with(reply: StubReply) -> Agent {
     agent_with_replies(vec![reply]).0
@@ -187,9 +218,14 @@ fn agent_with(reply: StubReply) -> Agent {
 /// 注入多步替身回复的 Agent，并返回共享状态供请求断言。
 fn agent_with_replies(replies: Vec<StubReply>) -> (Agent, Arc<StubState>) {
     let state = Arc::new(StubState::default());
-    let mut agent = Agent::new(Config::default()).with_model("test/model");
+    let mut agent = Agent::new(Config::default(), workspace()).with_model("test/model");
     agent.llm = Some(stub_llm(replies, Arc::clone(&state)));
     (agent, state)
+}
+
+/// 用例用的工作目录：真实存在的临时目录，供沙盒策略使用。
+fn workspace() -> std::path::PathBuf {
+    std::env::temp_dir()
 }
 
 /// 构造按序返回给定回复的替身。
@@ -287,7 +323,11 @@ async fn unknown_tool_call_result_is_committed_and_turn_continues() {
     agent.chat("你好", &mut ui).await;
 
     // 工具不存在不是用户可见错误：结果回给模型，由模型继续本轮。
-    assert_eq!(ui.events, vec![UiEvent::TurnFinished]);
+    let (calls, results) = tool_events(&ui.events);
+    assert_eq!(calls, vec![("run_shell".to_string(), "{}".to_string())]);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("不存在"), "{}", results[0]);
+    assert_eq!(ui.events.last(), Some(&UiEvent::TurnFinished));
     // 历史：用户输入 + 函数调用 + 工具结果 + 模型最终回答。
     assert_eq!(agent.history.len(), 4);
     assert_eq!(user_text(&agent.history[0]).as_deref(), Some("你好"));
@@ -322,7 +362,15 @@ async fn multiple_unknown_tool_calls_get_results_in_order() {
 
     agent.chat("你好", &mut ui).await;
 
-    assert_eq!(ui.events, vec![UiEvent::TurnFinished]);
+    let (calls, results) = tool_events(&ui.events);
+    assert_eq!(
+        calls,
+        vec![
+            ("run_shell".to_string(), "{}".to_string()),
+            ("read_file".to_string(), "{}".to_string()),
+        ]
+    );
+    assert_eq!(results.len(), 2);
     // 历史：用户输入 + 两次调用 + 两条结果 + 最终回答。
     assert_eq!(agent.history.len(), 6);
     assert_eq!(
@@ -353,7 +401,14 @@ async fn committed_tool_step_survives_later_model_error() {
 
     agent.chat("你好", &mut ui).await;
 
-    assert_eq!(ui.events, vec![UiEvent::Error("服务端错误".to_string())]);
+    // 工具调用与结果先展示，随后第二步失败只报错。
+    let (calls, results) = tool_events(&ui.events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        ui.events.last(),
+        Some(&UiEvent::Error("服务端错误".to_string()))
+    );
     // 首步（用户输入 + 调用 + 结果）已完整提交；第二步失败只丢弃第二步输出。
     assert_eq!(agent.history.len(), 3);
 }
@@ -383,7 +438,7 @@ async fn with_model_overrides_default_model() {
         default_model: Some("other/model".to_string()),
         ..Config::default()
     };
-    let mut agent = Agent::new(config).with_model("deepseek/deepseek-flash");
+    let mut agent = Agent::new(config, workspace()).with_model("deepseek/deepseek-flash");
     let mut ui = RecordingUi::default();
 
     agent.chat("你好", &mut ui).await;
@@ -404,14 +459,14 @@ fn new_falls_back_to_default_model() {
         ..Config::default()
     };
 
-    let agent = Agent::new(config);
+    let agent = Agent::new(config, workspace());
 
     assert_eq!(agent.model.as_deref(), Some("deepseek/deepseek-flash"));
 }
 
 #[tokio::test]
 async fn new_without_any_model_reports_missing_model() {
-    let mut agent = Agent::new(Config::default());
+    let mut agent = Agent::new(Config::default(), workspace());
     let mut ui = RecordingUi::default();
 
     agent.chat("你好", &mut ui).await;
@@ -421,4 +476,79 @@ async fn new_without_any_model_reports_missing_model() {
         other => panic!("应展示错误，实际是 {other:?}"),
     }
     assert!(agent.history.is_empty());
+}
+
+#[tokio::test]
+async fn chat_sends_tool_definitions_to_the_model() {
+    let (mut agent, state) = agent_with_replies(vec![StubReply::Answer("你好")]);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("你好", &mut ui).await;
+
+    // 默认注册表里有 bash：请求必须带上它的名称与参数说明。
+    let tools = state.last_tools();
+    assert_eq!(tools.len(), 1);
+    let value = serde_json::to_value(&tools[0]).expect("工具定义应可序列化");
+    assert_eq!(value["type"], "function");
+    assert_eq!(value["name"], "bash");
+    assert_eq!(value["parameters"]["required"], json!(["command"]));
+}
+
+#[tokio::test]
+async fn bash_call_result_is_committed_and_turn_continues() {
+    let (mut agent, _state) = agent_with_replies(vec![
+        StubReply::FunctionCall("bash"),
+        StubReply::Answer("命令没跑成，我换个办法。"),
+    ]);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("看一下当前目录", &mut ui).await;
+
+    // 替身给出的参数是空对象，属于参数错误：结果照样回写历史并继续本轮。
+    let (calls, results) = tool_events(&ui.events);
+    assert_eq!(calls, vec![("bash".to_string(), "{}".to_string())]);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].contains("参数不合法"), "{}", results[0]);
+    assert_eq!(ui.events.last(), Some(&UiEvent::TurnFinished));
+    // 历史：用户输入 + 函数调用 + 工具结果 + 最终回答。
+    assert_eq!(agent.history.len(), 4);
+    assert_eq!(
+        function_call_name(&agent.history[1]).as_deref(),
+        Some("bash")
+    );
+    assert_eq!(
+        function_call_output(&agent.history[2])
+            .expect("第三步应是工具结果")
+            .1,
+        results[0]
+    );
+}
+
+#[tokio::test]
+async fn with_tools_registers_only_selected_tools() {
+    let (agent, state) = agent_with_replies(vec![StubReply::Answer("你好")]);
+    let mut agent = agent.with_tools(&["bash"]);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("你好", &mut ui).await;
+
+    let tools = state.last_tools();
+    assert_eq!(tools.len(), 1);
+    let value = serde_json::to_value(&tools[0]).expect("工具定义应可序列化");
+    assert_eq!(value["name"], "bash");
+    assert_eq!(ui.events, vec![UiEvent::TurnFinished]);
+}
+
+#[tokio::test]
+async fn with_tools_skips_unknown_names_and_keeps_the_turn_running() {
+    let (agent, state) = agent_with_replies(vec![StubReply::Answer("你好")]);
+    let mut agent = agent.with_tools(&["run_shell"]);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("你好", &mut ui).await;
+
+    // 名称不存在只记录日志并跳过：请求不带任何工具，本轮照常完成。
+    assert!(state.last_tools().is_empty());
+    assert_eq!(ui.events, vec![UiEvent::TurnFinished]);
+    assert_eq!(agent.history.len(), 2);
 }

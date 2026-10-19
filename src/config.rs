@@ -10,18 +10,24 @@ use std::{collections::BTreeMap, fs, path::Path};
 
 use serde::Deserialize;
 
+use crate::sandbox::SandboxMode;
+
 /// 非敏感配置文件名，随仓库提交。
 const CONFIG_FILE: &str = "config.toml";
 /// 敏感凭据文件名，随本地环境提供，不提交。
 const AUTH_FILE: &str = "auth.toml";
+/// bash 工具的默认超时（毫秒）。
+const BASH_DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// 运行时配置：默认模型规则与合并后的 provider 表。
+/// 运行时配置：默认模型规则、合并后的 provider 表与工具配置。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Config {
     /// 默认模型规则，形如 `provider/model`。
     pub default_model: Option<String>,
     /// 各 provider 的连接信息与凭据，键为 provider 名。
     pub providers: BTreeMap<String, ProviderConfig>,
+    /// bash 工具配置。
+    pub bash: BashConfig,
 }
 
 /// 单个 provider 的连接信息与凭据，同时是文件里 provider 条目的形状。
@@ -37,6 +43,33 @@ impl Config {
     /// 按名字取 provider 配置。
     pub fn provider(&self, name: &str) -> Option<&ProviderConfig> {
         self.providers.get(name)
+    }
+}
+
+/// `[tools.bash]` 分节：命令的沙盒边界与超时。
+///
+/// 这里用 `deny_unknown_fields`：字段名写错时直接解析失败，避免边界配置被静默忽略。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BashConfig {
+    /// 沙盒模式，取值 `workspace-write`（默认，工作区与临时目录可写）或 `read-only`。
+    pub sandbox_mode: SandboxMode,
+    /// 是否允许命令访问网络，默认 `false`（禁网）。
+    pub network_access: bool,
+    /// 单条命令的默认超时（毫秒），默认 120000。
+    pub timeout_ms: u64,
+    /// 工作区与临时目录之外追加的可写根，默认空。
+    pub writable_roots: Vec<std::path::PathBuf>,
+}
+
+impl Default for BashConfig {
+    fn default() -> Self {
+        Self {
+            sandbox_mode: SandboxMode::default(),
+            network_access: false,
+            timeout_ms: BASH_DEFAULT_TIMEOUT_MS,
+            writable_roots: Vec::new(),
+        }
     }
 }
 
@@ -73,6 +106,7 @@ pub fn load(config_dir: &Path) -> Result<Config, String> {
     Ok(Config {
         default_model: config_llm.default_model,
         providers,
+        bash: raw_config.tools.bash,
     })
 }
 
@@ -94,6 +128,9 @@ struct ConfigFile {
     /// LLM 相关配置；整个分节缺失时按默认值处理。
     #[serde(default)]
     llm: LLMSection,
+    /// 工具相关配置；整个分节缺失时按默认值处理。
+    #[serde(default)]
+    tools: ToolsSection,
 }
 
 /// 文件里的 `[llm]` 分节：固定骨架 + 动态 provider 表。
@@ -104,6 +141,14 @@ struct LLMSection {
     /// 各 provider 的条目，键为 provider 名。
     #[serde(default)]
     providers: BTreeMap<String, ProviderConfig>,
+}
+
+/// 文件里的 `[tools]` 分节：目前只有 bash 工具。
+#[derive(Debug, Default, Deserialize)]
+struct ToolsSection {
+    /// bash 工具配置，整个分节缺失时按默认值处理（默认禁网）。
+    #[serde(default)]
+    bash: BashConfig,
 }
 
 /// 读取并解析单个 TOML 文件。

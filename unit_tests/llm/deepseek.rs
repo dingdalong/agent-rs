@@ -1,11 +1,13 @@
 use async_openai::{
     error::OpenAIError,
-    types::responses::{EasyInputMessage, InputItem, ResponseStreamEvent},
+    types::responses::{
+        CreateResponseArgs, EasyInputMessage, FunctionTool, InputItem, ResponseStreamEvent, Tool,
+    },
 };
 use futures_util::stream;
 use serde_json::json;
 
-use super::{EventStream, collect_turn, skip_stream_error};
+use super::{EventStream, collect_turn, fill_request, skip_stream_error};
 use crate::ui::{Ui, UiEvent};
 
 /// 记录收到的事件，替代真实终端输出。
@@ -220,4 +222,47 @@ fn easy_input_message_serializes_as_user_message_item() {
             "content": "你好",
         })
     );
+}
+
+#[test]
+fn request_carries_items_and_tools() {
+    let tools = vec![Tool::Function(FunctionTool {
+        name: "bash".to_string(),
+        description: Some("在工作区沙盒中执行命令".to_string()),
+        parameters: Some(json!({"type": "object"})),
+        strict: None,
+        defer_loading: None,
+    })];
+    let mut builder = CreateResponseArgs::default();
+
+    fill_request(
+        &mut builder,
+        "deepseek-flash",
+        vec![InputItem::from(EasyInputMessage::from("你好"))],
+        tools,
+    );
+    let request = builder.build().expect("请求应构造成功");
+    let value = serde_json::to_value(&request).expect("请求应可序列化");
+
+    assert_eq!(value["model"], "deepseek-flash");
+    assert_eq!(value["input"][0]["content"], "你好");
+    assert_eq!(value["tools"][0]["type"], "function");
+    assert_eq!(value["tools"][0]["name"], "bash");
+    assert_eq!(value["tools"][0]["description"], "在工作区沙盒中执行命令");
+}
+
+#[test]
+fn request_omits_empty_tool_list() {
+    let mut builder = CreateResponseArgs::default();
+
+    fill_request(
+        &mut builder,
+        "deepseek-flash",
+        vec![InputItem::from(EasyInputMessage::from("你好"))],
+        Vec::new(),
+    );
+    let request = builder.build().expect("请求应构造成功");
+    let value = serde_json::to_value(&request).expect("请求应可序列化");
+
+    assert!(value.get("tools").is_none(), "{value}");
 }
