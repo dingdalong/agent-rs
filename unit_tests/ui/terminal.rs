@@ -66,6 +66,57 @@ fn each_tool_call_starts_its_own_line() {
 }
 
 #[test]
+fn permission_decision_gets_its_own_line_between_call_and_result() {
+    let chunks = format_all(&[
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: "rm obsolete.txt".to_string(),
+        },
+        UiEvent::ToolPermission {
+            allowed: true,
+            reason: "用户明确要求删除该文件".to_string(),
+        },
+        UiEvent::ToolResult("退出码：0\n".to_string()),
+    ]);
+
+    assert_eq!(
+        chunks,
+        vec![
+            stdout("[工具] "),
+            stdout("bash：rm obsolete.txt\n"),
+            stdout("[权限] "),
+            stdout("允许：用户明确要求删除该文件\n"),
+            stdout("[工具结果] "),
+            stdout("退出码：0\n"),
+        ]
+    );
+}
+
+#[test]
+fn denied_permission_reports_the_tool_was_not_executed() {
+    let chunks = format_all(&[
+        UiEvent::ToolCall {
+            name: "bash".to_string(),
+            summary: "rm -rf *".to_string(),
+        },
+        UiEvent::ToolPermission {
+            allowed: false,
+            reason: "通配删除未逐一指定目标".to_string(),
+        },
+    ]);
+
+    assert_eq!(
+        chunks,
+        vec![
+            stdout("[工具] "),
+            stdout("bash：rm -rf *\n"),
+            stdout("[权限] "),
+            stdout("拒绝：通配删除未逐一指定目标（工具未执行）\n"),
+        ]
+    );
+}
+
+#[test]
 fn tool_result_and_following_answer_start_new_blocks() {
     let chunks = format_all(&[
         UiEvent::ToolCall {

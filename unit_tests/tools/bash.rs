@@ -14,7 +14,7 @@ use super::{
 };
 use crate::{
     sandbox::{SandboxMode, SandboxPolicy},
-    tools::Tool,
+    tools::{SandboxFailureEvidence, Tool, ToolExecutionError},
 };
 
 /// 每个用例独立的工作区目录，避免相互干扰。
@@ -39,7 +39,11 @@ fn bash_tool(name: &str, network_access: bool) -> Bash {
 }
 
 /// 直接调用工具，返回结果文本或错误信息。
-async fn call_tool(tool: &Bash, command: &str, timeout_ms: Option<u64>) -> Result<String, String> {
+async fn call_tool(
+    tool: &Bash,
+    command: &str,
+    timeout_ms: Option<u64>,
+) -> Result<String, ToolExecutionError> {
     let mut arguments = json!({ "command": command });
     if let Some(timeout_ms) = timeout_ms {
         arguments["timeout_ms"] = json!(timeout_ms);
@@ -56,10 +60,14 @@ async fn run(tool: &Bash, command: &str, timeout_ms: Option<u64>) -> Option<Stri
             None
         }
         Ok(output) => Some(output),
-        Err(message) => {
-            eprintln!("跳过：沙盒不可用：{message}");
+        Err(ToolExecutionError::Sandbox {
+            evidence: SandboxFailureEvidence::Unavailable | SandboxFailureEvidence::SetupFailed,
+            message,
+        }) => {
+            eprintln!("跳过：沙盒不可用或启动失败：{message}");
             None
         }
+        Err(error) => panic!("命令执行失败：{error:?}"),
     }
 }
 
@@ -142,6 +150,36 @@ fn call_summary_prefers_the_command() {
     assert_eq!(tool.call_summary(r#"{"command":"ls -la"}"#), "ls -la");
     // 参数不合法时退回展示原始参数，便于用户看到模型到底发了什么。
     assert_eq!(tool.call_summary("{"), "{");
+}
+
+#[test]
+fn permission_summary_requires_valid_arguments() {
+    let tool = bash_tool("permission-summary", false);
+
+    assert_eq!(
+        tool.permission_summary(r#"{"command":"ls -la"}"#)
+            .expect("合法参数应生成权限摘要"),
+        "ls -la"
+    );
+    let error = tool
+        .permission_summary("{")
+        .expect_err("非法参数不应进入权限判断");
+    assert!(error.contains("参数不合法"), "{error}");
+}
+
+#[test]
+fn description_lists_effective_writable_roots() {
+    let tool = bash_tool("description-roots", false);
+    let workspace = fs::canonicalize(&tool.policy.workspace).expect("解析工作区");
+
+    assert!(
+        tool.description()
+            .contains(&workspace.display().to_string()),
+        "{}",
+        tool.description()
+    );
+    assert!(tool.description().contains("workspace-write"));
+    assert!(tool.description().contains("禁止访问网络"));
 }
 
 #[test]
@@ -260,6 +298,17 @@ async fn captures_stderr_and_exit_code() {
 }
 
 #[tokio::test]
+async fn ordinary_nonzero_exit_stays_a_successful_tool_result() {
+    let tool = bash_tool("ordinary-failure", false);
+    let Some(output) = run(&tool, "printf 普通失败 >&2; exit 3", None).await else {
+        return;
+    };
+
+    assert!(output.contains("退出码：3"), "{output}");
+    assert!(output.contains("普通失败"), "{output}");
+}
+
+#[tokio::test]
 async fn empty_output_is_reported() {
     let tool = bash_tool("empty", false);
     let Some(output) = run(&tool, "true", None).await else {
@@ -297,18 +346,55 @@ async fn writes_inside_workspace_and_denies_outside_writes() {
     let outside_dir = fs::canonicalize("/var/tmp").expect("系统应有 /var/tmp");
     let outside = outside_dir.join(format!("agent-rs-outside-{}.txt", std::process::id()));
     let command = format!("printf hi > {}", outside.display());
-    let Some(output) = run(&tool, &command, None).await else {
-        return;
+    let output = match call_tool(&tool, &command, None).await {
+        Ok(output) if is_environment_block(&output) => {
+            eprintln!("跳过：当前环境不允许应用沙盒：{output}");
+            return;
+        }
+        Ok(output) => panic!("向工作区外写入应被沙盒拒绝：{output}"),
+        Err(ToolExecutionError::Sandbox {
+            evidence: SandboxFailureEvidence::Unavailable | SandboxFailureEvidence::SetupFailed,
+            message,
+        }) => {
+            eprintln!("跳过：沙盒不可用或启动失败：{message}");
+            return;
+        }
+        Err(ToolExecutionError::Sandbox {
+            message,
+            evidence: SandboxFailureEvidence::DeniedOutput,
+        }) => message,
+        Err(error) => panic!("沙盒拒绝应返回结构化错误：{error:?}"),
     };
     assert!(!output.contains("退出码：0"), "{output}");
+    assert!(output.contains("Operation not permitted"), "{output}");
+    assert!(
+        output.contains("提示：该失败可能由沙盒限制导致"),
+        "{output}"
+    );
     assert!(!outside.exists(), "工作区外不应被写入：{output}");
 }
 
 #[tokio::test]
 async fn denies_network_when_policy_disables_it() {
     let tool = bash_tool("network-off", false);
-    let Some(output) = run(&tool, "exec 3<>/dev/tcp/127.0.0.1/1", None).await else {
-        return;
+    let output = match call_tool(&tool, "exec 3<>/dev/tcp/127.0.0.1/1", None).await {
+        Ok(output) if is_environment_block(&output) => {
+            eprintln!("跳过：当前环境不允许应用沙盒：{output}");
+            return;
+        }
+        Ok(output) => panic!("联网应被沙盒拒绝：{output}"),
+        Err(ToolExecutionError::Sandbox {
+            evidence: SandboxFailureEvidence::Unavailable | SandboxFailureEvidence::SetupFailed,
+            message,
+        }) => {
+            eprintln!("跳过：沙盒不可用或启动失败：{message}");
+            return;
+        }
+        Err(ToolExecutionError::Sandbox {
+            message,
+            evidence: SandboxFailureEvidence::DeniedOutput,
+        }) => message,
+        Err(error) => panic!("沙盒拒绝应返回结构化错误：{error:?}"),
     };
 
     // 连接被沙盒拒绝：命令失败，并在结果里给出边界提示。
@@ -317,6 +403,88 @@ async fn denies_network_when_policy_disables_it() {
     assert!(
         output.contains("提示：该失败可能由沙盒限制导致"),
         "{output}"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_marker_is_structured_even_when_exit_code_is_zero() {
+    let tool = bash_tool("marker-exit-zero", false);
+    let output = match call_tool(&tool, "printf 'operation not permitted'; exit 0", None).await {
+        Ok(output) if is_environment_block(&output) => {
+            eprintln!("跳过：当前环境不允许应用沙盒：{output}");
+            return;
+        }
+        Ok(output) => panic!("命中沙盒限制特征时应返回结构化错误：{output}"),
+        Err(ToolExecutionError::Sandbox {
+            evidence: SandboxFailureEvidence::Unavailable | SandboxFailureEvidence::SetupFailed,
+            message,
+        }) => {
+            eprintln!("跳过：沙盒不可用或启动失败：{message}");
+            return;
+        }
+        Err(ToolExecutionError::Sandbox {
+            message,
+            evidence: SandboxFailureEvidence::DeniedOutput,
+        }) => message,
+        Err(error) => panic!("沙盒拒绝应返回结构化错误：{error:?}"),
+    };
+
+    assert!(output.contains("退出码：0"), "{output}");
+    assert!(output.contains("operation not permitted"), "{output}");
+    assert!(
+        output.contains("提示：该失败可能由沙盒限制导致"),
+        "{output}"
+    );
+}
+
+#[tokio::test]
+async fn unavailable_sandbox_is_a_structured_failure() {
+    let policy = SandboxPolicy::new(
+        SandboxMode::WorkspaceWrite,
+        false,
+        PathBuf::from("relative-workspace"),
+        Vec::new(),
+    );
+    let tool = Bash::new(policy, 120_000);
+
+    let error = call_tool(&tool, "true", None)
+        .await
+        .expect_err("相对工作目录应在启动自检时判定沙盒不可用");
+
+    assert!(
+        matches!(
+            error,
+            ToolExecutionError::Sandbox {
+                evidence: SandboxFailureEvidence::Unavailable,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_spawn_failure_is_setup_failed() {
+    let tool = bash_tool("setup-failed", false);
+    if tool.probe.is_err() {
+        eprintln!("跳过：沙盒在当前环境不可用");
+        return;
+    }
+    fs::remove_dir_all(&tool.policy.workspace).expect("删除临时工作区");
+
+    let error = call_tool(&tool, "true", None)
+        .await
+        .expect_err("工作目录不存在时沙盒命令应启动失败");
+
+    assert!(
+        matches!(
+            error,
+            ToolExecutionError::Sandbox {
+                evidence: SandboxFailureEvidence::SetupFailed,
+                ..
+            }
+        ),
+        "{error:?}"
     );
 }
 

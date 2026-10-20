@@ -16,7 +16,7 @@ use async_openai::types::responses::{EasyInputMessage, InputItem};
 use crate::{
     config::Config,
     llm::{self, LLM},
-    tools::ToolExecutor,
+    tools::{LlmToolPermissionJudge, ToolExecutor},
     ui::{Ui, UiEvent},
 };
 
@@ -114,7 +114,11 @@ impl Agent {
 
             // 工具结果与调用同一步提交，保证历史里不会出现没有结果的函数调用。
             let mut committed = outcome.output_items;
-            let tool_outputs = self.tools.execute_calls(&committed, ui).await;
+            let judge = LlmToolPermissionJudge::new(llm.as_ref());
+            let tool_outputs = self
+                .tools
+                .execute_calls(&committed, user_input, &judge, ui)
+                .await;
             let needs_follow_up = !tool_outputs.is_empty();
             committed.extend(tool_outputs);
             self.commit_step(pending_input.take(), committed);

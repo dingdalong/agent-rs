@@ -2,7 +2,10 @@ use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_openai::types::responses::{InputItem, OutputItem, Tool as LlmTool};
@@ -12,6 +15,7 @@ use super::Agent;
 use crate::{
     config::Config,
     llm::{LLM, StepOutcome},
+    tools::{Tool, ToolExecutionError, ToolExecutor, ToolPermissionRequest},
     ui::{Ui, UiEvent},
 };
 
@@ -46,6 +50,7 @@ impl Ui for SilentUi {
 struct StubLlm {
     replies: Mutex<VecDeque<StubReply>>,
     state: Arc<StubState>,
+    judgement: StubJudgement,
 }
 
 /// 替身共享状态，供用例在请求发出后断言。
@@ -53,6 +58,7 @@ struct StubLlm {
 struct StubState {
     requests: Mutex<Vec<Vec<InputItem>>>,
     tools: Mutex<Vec<Vec<LlmTool>>>,
+    judge_requests: Mutex<Vec<ToolPermissionRequest>>,
 }
 
 impl StubState {
@@ -75,6 +81,14 @@ impl StubState {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// 权限判断收到的全部请求。
+    fn judge_requests(&self) -> Vec<ToolPermissionRequest> {
+        self.judge_requests
+            .lock()
+            .expect("权限请求记录锁未被污染")
+            .clone()
+    }
 }
 
 /// 用例期望的替身行为。
@@ -90,13 +104,46 @@ enum StubReply {
     ModelError(&'static str),
 }
 
+/// 权限判断替身的预设结论。
+#[derive(Clone, Copy)]
+enum StubJudgement {
+    /// 允许执行。
+    Allow,
+    /// 拒绝执行。
+    Deny(&'static str),
+    /// 判断本身失败。
+    Error(&'static str),
+}
+
 impl LLM for StubLlm {
     fn chat(
         &self,
         input: Vec<InputItem>,
         tools: Vec<LlmTool>,
-        _ui: &mut (dyn Ui + Send),
+        ui: &mut (dyn Ui + Send),
     ) -> Pin<Box<dyn Future<Output = Result<StepOutcome, String>> + Send + '_>> {
+        if let Some(request) = permission_request(&input) {
+            self.state
+                .judge_requests
+                .lock()
+                .expect("权限请求记录锁未被污染")
+                .push(request);
+            ui.render(UiEvent::AnswerText("权限判断内部输出".to_string()));
+            let judgement = self.judgement;
+            return Box::pin(async move {
+                match judgement {
+                    StubJudgement::Allow => Ok(StepOutcome {
+                        output_items: Vec::new(),
+                        text: r#"{"allowed":true,"reason":"与当前请求相关"}"#.to_string(),
+                    }),
+                    StubJudgement::Deny(reason) => Ok(StepOutcome {
+                        output_items: Vec::new(),
+                        text: format!(r#"{{"allowed":false,"reason":"{reason}"}}"#),
+                    }),
+                    StubJudgement::Error(message) => Err(message.to_string()),
+                }
+            });
+        }
         self.state
             .requests
             .lock()
@@ -134,6 +181,27 @@ impl LLM for StubLlm {
             }
         })
     }
+}
+
+/// 从权限适配器发出的 system/user 消息还原审查请求。
+fn permission_request(input: &[InputItem]) -> Option<ToolPermissionRequest> {
+    if input.len() != 2 {
+        return None;
+    }
+    let system = serde_json::to_value(&input[0]).ok()?;
+    let user = serde_json::to_value(&input[1]).ok()?;
+    if system["role"] != "system" || user["role"] != "user" {
+        return None;
+    }
+    let payload: serde_json::Value = serde_json::from_str(user["content"].as_str()?).ok()?;
+    let tool = payload.get("tool")?;
+    Some(ToolPermissionRequest::new(
+        payload["current_user_request"].as_str()?,
+        tool["name"].as_str()?,
+        tool["description"].as_str()?,
+        tool["summary"].as_str()?.to_string(),
+        tool["arguments"].as_str()?,
+    ))
 }
 
 /// 构造一条助手输出 item。
@@ -230,10 +298,71 @@ fn workspace() -> std::path::PathBuf {
 
 /// 构造按序返回给定回复的替身。
 fn stub_llm(replies: Vec<StubReply>, state: Arc<StubState>) -> Box<dyn LLM> {
+    stub_llm_with_judgement(replies, state, StubJudgement::Allow)
+}
+
+/// 构造带指定权限判断结论的替身。
+fn stub_llm_with_judgement(
+    replies: Vec<StubReply>,
+    state: Arc<StubState>,
+    judgement: StubJudgement,
+) -> Box<dyn LLM> {
     Box::new(StubLlm {
         replies: Mutex::new(replies.into()),
         state,
+        judgement,
     })
+}
+
+/// 注入权限判断结论与多步回复的 Agent，并返回共享状态。
+fn agent_with_judgement(
+    replies: Vec<StubReply>,
+    judgement: StubJudgement,
+) -> (Agent, Arc<StubState>) {
+    let state = Arc::new(StubState::default());
+    let mut agent = Agent::new(Config::default(), workspace()).with_model("test/model");
+    agent.llm = Some(stub_llm_with_judgement(
+        replies,
+        Arc::clone(&state),
+        judgement,
+    ));
+    (agent, state)
+}
+
+/// 回显工具，用于确认权限拒绝时工具没有被执行。
+struct EchoTool {
+    executions: Arc<AtomicUsize>,
+}
+
+impl Tool for EchoTool {
+    fn name(&self) -> &'static str {
+        "echo"
+    }
+
+    fn description(&self) -> &'static str {
+        "回显调用参数"
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({"type": "object"})
+    }
+
+    fn call<'a>(
+        &'a self,
+        arguments: String,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecutionError>> + Send + 'a>> {
+        self.executions.fetch_add(1, Ordering::Relaxed);
+        Box::pin(async move { Ok(format!("回显：{arguments}")) })
+    }
+}
+
+/// 把 Agent 的工具替换成可计数的 echo，便于观察权限门控是否真正阻止执行。
+fn with_echo_tool(mut agent: Agent) -> (Agent, Arc<AtomicUsize>) {
+    let executions = Arc::new(AtomicUsize::new(0));
+    agent.tools = ToolExecutor::with_tools(vec![Box::new(EchoTool {
+        executions: Arc::clone(&executions),
+    })]);
+    (agent, executions)
 }
 
 #[tokio::test]
@@ -522,6 +651,132 @@ async fn bash_call_result_is_committed_and_turn_continues() {
             .1,
         results[0]
     );
+}
+
+#[tokio::test]
+async fn tool_permission_receives_current_request_and_allows_execution() {
+    let (agent, state) = agent_with_replies(vec![
+        StubReply::FunctionCall("echo"),
+        StubReply::Answer("已经处理。"),
+    ]);
+    let (mut agent, executions) = with_echo_tool(agent);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("请回显参数", &mut ui).await;
+
+    assert_eq!(executions.load(Ordering::Relaxed), 1);
+    let requests = state.judge_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].user_request, "请回显参数");
+    assert_eq!(requests[0].tool_name, "echo");
+    assert!(ui.events.contains(&UiEvent::ToolPermission {
+        allowed: true,
+        reason: "与当前请求相关".to_string(),
+    }));
+    assert!(
+        !ui.events
+            .contains(&UiEvent::AnswerText("权限判断内部输出".to_string()))
+    );
+    assert_eq!(ui.events.last(), Some(&UiEvent::TurnFinished));
+    assert_eq!(agent.history.len(), 4);
+}
+
+#[tokio::test]
+async fn denied_tool_never_executes_and_turn_continues() {
+    let (agent, state) = agent_with_judgement(
+        vec![
+            StubReply::FunctionCall("echo"),
+            StubReply::Answer("我改用其他方式。"),
+        ],
+        StubJudgement::Deny("调用与当前请求无关"),
+    );
+    let (mut agent, executions) = with_echo_tool(agent);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("请不要执行无关操作", &mut ui).await;
+
+    assert_eq!(executions.load(Ordering::Relaxed), 0);
+    assert_eq!(state.judge_requests().len(), 1);
+    assert!(ui.events.contains(&UiEvent::ToolPermission {
+        allowed: false,
+        reason: "调用与当前请求无关".to_string(),
+    }));
+    assert!(
+        !ui.events
+            .iter()
+            .any(|event| matches!(event, UiEvent::ToolResult(_)))
+    );
+    let history_output = function_call_output(&agent.history[2])
+        .expect("历史中仍应有工具结果")
+        .1;
+    assert!(history_output.contains("权限判断拒绝"), "{history_output}");
+    assert_eq!(ui.events.last(), Some(&UiEvent::TurnFinished));
+    assert_eq!(agent.history.len(), 4);
+}
+
+#[tokio::test]
+async fn failed_permission_judgment_skips_execution_and_continues() {
+    let (agent, state) = agent_with_judgement(
+        vec![
+            StubReply::FunctionCall("echo"),
+            StubReply::Answer("权限服务异常，我暂时不执行。"),
+        ],
+        StubJudgement::Error("审查请求超时"),
+    );
+    let (mut agent, executions) = with_echo_tool(agent);
+    let mut ui = RecordingUi::default();
+
+    agent.chat("回显参数", &mut ui).await;
+
+    assert_eq!(executions.load(Ordering::Relaxed), 0);
+    assert_eq!(state.judge_requests().len(), 1);
+    assert!(
+        !ui.events
+            .iter()
+            .any(|event| matches!(event, UiEvent::ToolResult(_)))
+    );
+    let history_output = function_call_output(&agent.history[2])
+        .expect("历史中仍应有工具结果")
+        .1;
+    assert!(history_output.contains("审查请求超时"), "{history_output}");
+    assert!(history_output.contains("失败即拒绝"), "{history_output}");
+    assert_eq!(ui.events.last(), Some(&UiEvent::TurnFinished));
+    assert_eq!(agent.history.len(), 4);
+}
+
+#[tokio::test]
+async fn permission_judgment_follows_the_rebuilt_llm() {
+    let (agent, first_state) = agent_with_replies(vec![
+        StubReply::FunctionCall("echo"),
+        StubReply::Answer("第一次完成。"),
+    ]);
+    let (mut agent, executions) = with_echo_tool(agent);
+    let mut ui = RecordingUi::default();
+    agent.chat("第一次回显", &mut ui).await;
+    assert_eq!(executions.load(Ordering::Relaxed), 1);
+    assert_eq!(first_state.judge_requests().len(), 1);
+
+    agent.set_model("test/other-model");
+    let second_state = Arc::new(StubState::default());
+    agent.llm = Some(stub_llm_with_judgement(
+        vec![
+            StubReply::FunctionCall("echo"),
+            StubReply::Answer("第二次被拒绝。"),
+        ],
+        Arc::clone(&second_state),
+        StubJudgement::Deny("新模型拒绝该调用"),
+    ));
+    let mut ui = RecordingUi::default();
+    agent.chat("第二次回显", &mut ui).await;
+
+    assert_eq!(executions.load(Ordering::Relaxed), 1);
+    let requests = second_state.judge_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].user_request, "第二次回显");
+    assert!(ui.events.contains(&UiEvent::ToolPermission {
+        allowed: false,
+        reason: "新模型拒绝该调用".to_string(),
+    }));
 }
 
 #[tokio::test]

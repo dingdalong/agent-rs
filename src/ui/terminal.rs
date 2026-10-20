@@ -18,6 +18,8 @@ const REASONING_PREFIX: &str = "[思考] ";
 const ANSWER_PREFIX: &str = "[助手] ";
 /// 工具调用行前缀。
 const TOOL_CALL_PREFIX: &str = "[工具] ";
+/// 工具权限判断行前缀。
+const TOOL_PERMISSION_PREFIX: &str = "[权限] ";
 /// 工具结果块前缀。
 const TOOL_RESULT_PREFIX: &str = "[工具结果] ";
 
@@ -125,6 +127,8 @@ enum OutputBlock {
     Answer,
     /// 单行工具调用块，块首写 `[工具] `。
     ToolCall,
+    /// 单行权限判断块，块首写 `[权限] `。
+    ToolPermission,
     /// 工具结果块，块首写 `[工具结果] `。
     ToolResult,
 }
@@ -169,6 +173,20 @@ impl OutputFormatter {
                 self.start_block(OutputBlock::ToolCall, TOOL_CALL_PREFIX, &mut chunks);
                 self.write_text(&line, &mut chunks);
                 // 每次调用独占一行，下一次调用/结果重新写前缀。
+                self.block = None;
+            }
+            UiEvent::ToolPermission { allowed, reason } => {
+                let line = if *allowed {
+                    format!("允许：{reason}\n")
+                } else {
+                    format!("拒绝：{reason}（工具未执行）\n")
+                };
+                self.start_block(
+                    OutputBlock::ToolPermission,
+                    TOOL_PERMISSION_PREFIX,
+                    &mut chunks,
+                );
+                self.write_text(&line, &mut chunks);
                 self.block = None;
             }
             UiEvent::ToolResult(text) => {

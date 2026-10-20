@@ -14,7 +14,9 @@ pub enum UiEvent {
     ReasoningText(String),
     /// 模型发起一次工具调用；`summary` 是调用的一行摘要（如要执行的命令）。
     ToolCall { name: String, summary: String },
-    /// 一次工具调用的结果文本。
+    /// 一次工具调用的智能权限判断结论。
+    ToolPermission { allowed: bool, reason: String },
+    /// 一次已经尝试执行（或无法建立调用）的工具结果文本；权限拒绝不发送此事件。
     ToolResult(String),
     /// 本轮成功输出结束，接收方据此收尾换行并复位格式状态。
     TurnFinished,

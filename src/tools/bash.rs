@@ -30,7 +30,7 @@ use tokio::{
 use crate::{
     config::Config,
     sandbox::{self, SandboxMode, SandboxPolicy},
-    tools::Tool,
+    tools::{SandboxFailureEvidence, Tool, ToolExecutionError},
 };
 
 /// 单次调用的最短超时。
@@ -135,15 +135,22 @@ impl Bash {
         Box::new(Self::new(policy, config.bash.timeout_ms))
     }
 
-    /// 执行一条命令：沙盒不可用时直接失败，其余失败都体现在结果文本里。
-    async fn run(&self, arguments: &Arguments) -> Result<String, String> {
+    /// 执行一条命令：沙盒问题返回结构化错误，命令自身失败保留在结果文本里。
+    async fn run(&self, arguments: &Arguments) -> Result<String, ToolExecutionError> {
         if let Err(message) = &self.probe {
-            return Err(message.clone());
+            return Err(ToolExecutionError::Sandbox {
+                message: message.clone(),
+                evidence: SandboxFailureEvidence::Unavailable,
+            });
         }
         let timeout_ms = effective_timeout_ms(arguments.timeout_ms, self.timeout_ms);
         let mut command = self
             .policy
-            .wrap(&arguments.command, &self.policy.workspace)?;
+            .wrap(&arguments.command, &self.policy.workspace)
+            .map_err(|message| ToolExecutionError::Sandbox {
+                message,
+                evidence: SandboxFailureEvidence::SetupFailed,
+            })?;
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -154,10 +161,14 @@ impl Bash {
         let started = Instant::now();
         let mut child = command
             .spawn()
-            .map_err(|error| format!("启动沙盒命令失败：{error}"))?;
-        let pid = child
-            .id()
-            .ok_or_else(|| "启动沙盒命令失败：拿不到子进程号".to_string())?;
+            .map_err(|error| ToolExecutionError::Sandbox {
+                message: format!("启动沙盒命令失败：{error}"),
+                evidence: SandboxFailureEvidence::SetupFailed,
+            })?;
+        let pid = child.id().ok_or_else(|| ToolExecutionError::Sandbox {
+            message: "启动沙盒命令失败：拿不到子进程号".to_string(),
+            evidence: SandboxFailureEvidence::SetupFailed,
+        })?;
         let stdout = child.stdout.take().expect("标准输出已设置为管道");
         let stderr = child.stderr.take().expect("标准错误已设置为管道");
         let stdout_task = tokio::spawn(read_stream(stdout));
@@ -165,7 +176,9 @@ impl Bash {
 
         let status =
             if let Ok(result) = timeout(Duration::from_millis(timeout_ms), child.wait()).await {
-                Some(result.map_err(|error| format!("等待命令结束失败：{error}"))?)
+                Some(result.map_err(|error| {
+                    ToolExecutionError::Other(format!("等待命令结束失败：{error}"))
+                })?)
             } else {
                 // 超时：整组终止后回收，避免留下后台进程。
                 kill_process_group(pid);
@@ -186,9 +199,17 @@ impl Bash {
             duration: started.elapsed(),
             stdout: &stdout,
             stderr: &stderr,
-            policy: &self.policy,
         };
-        Ok(format_result(&parts))
+        let output = format_result(&parts);
+        let stdout_text = String::from_utf8_lossy(&stdout);
+        let stderr_text = String::from_utf8_lossy(&stderr);
+        if let Some(hint) = sandbox_hint(&self.policy, &stdout_text, &stderr_text) {
+            return Err(ToolExecutionError::Sandbox {
+                message: format!("{output}{hint}\n"),
+                evidence: SandboxFailureEvidence::DeniedOutput,
+            });
+        }
+        Ok(output)
     }
 }
 
@@ -210,12 +231,16 @@ impl Tool for Bash {
             .map_or_else(|_| arguments.to_string(), |arguments| arguments.command)
     }
 
+    fn permission_summary(&self, arguments: &str) -> Result<String, String> {
+        parse_arguments(arguments).map(|arguments| arguments.command)
+    }
+
     fn call<'a>(
         &'a self,
         arguments: String,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, ToolExecutionError>> + Send + 'a>> {
         Box::pin(async move {
-            let arguments = parse_arguments(&arguments)?;
+            let arguments = parse_arguments(&arguments).map_err(ToolExecutionError::Other)?;
             self.run(&arguments).await
         })
     }
@@ -259,10 +284,19 @@ fn build_description(policy: &SandboxPolicy) -> String {
     );
     match policy.mode {
         SandboxMode::WorkspaceWrite => {
-            description.push_str("只有工作区与临时目录可以写入，系统其余部分只读；");
+            let roots = policy
+                .effective_writable_roots()
+                .iter()
+                .map(|root| root.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、");
+            let _ = write!(
+                description,
+                "沙盒模式：workspace-write；实际可写根：{roots}；系统其余部分只读；"
+            );
         }
         SandboxMode::ReadOnly => {
-            description.push_str("当前是只读模式，任何目录都不可写；");
+            description.push_str("沙盒模式：read-only；任何目录都不可写；");
         }
     }
     if policy.network_access {
@@ -410,8 +444,6 @@ struct ResultParts<'a> {
     stdout: &'a [u8],
     /// 标准错误原始字节。
     stderr: &'a [u8],
-    /// 当前沙盒策略，用于生成限制提示。
-    policy: &'a SandboxPolicy,
 }
 
 /// 把执行结果整理成模型可读的文本：元信息在前，输出在后。
@@ -440,16 +472,6 @@ fn format_result(parts: &ResultParts<'_>) -> String {
         push_section(&mut text, &truncate_middle(&stderr, stderr_budget));
     }
 
-    if !parts.timed_out
-        && parts
-            .status
-            .as_ref()
-            .is_some_and(|status| !status.success())
-        && let Some(hint) = sandbox_hint(parts.policy, &stdout, &stderr)
-    {
-        text.push_str(hint);
-        text.push('\n');
-    }
     text
 }
 
